@@ -398,6 +398,43 @@
     keywords: filters.keyword
   });
 
+  const parseMerchantApiResponse = async (response) => {
+    const contentType = response.headers.get("content-type")?.toLocaleLowerCase() || "";
+    const raw = (await response.text()).replace(/^\uFEFF/, "").trim();
+    const looksLikeHtml = contentType.includes("text/html") || /^</.test(raw);
+    const responseInfo = `HTTP ${response.status}${contentType ? `，${contentType}` : ""}`;
+
+    if (looksLikeHtml) {
+      const redirectedToLogin = response.redirected && /login|signin|登录/i.test(response.url);
+      throw new Error(
+        redirectedToLogin
+          ? "登录状态可能已失效，接口跳转到了登录页。请刷新原站并重新登录后重试。"
+          : `接口返回了网页而不是 JSON（${responseInfo}），可能是登录状态失效或站点安全校验拦截。请刷新当前链动小铺页面后重试。`
+      );
+    }
+
+    if (!raw) {
+      throw new Error(`接口返回为空（HTTP ${response.status}），请稍后重试。`);
+    }
+
+    let payload;
+    try {
+      payload = JSON.parse(raw);
+    } catch (_) {
+      throw new Error(`接口返回的不是有效 JSON（HTTP ${response.status}），请稍后重试。`);
+    }
+
+    if (!response.ok) {
+      throw new Error(payload?.msg || payload?.message || `接口请求失败：HTTP ${response.status}`);
+    }
+
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+      throw new Error("接口返回格式异常，请稍后重试。");
+    }
+
+    return payload;
+  };
+
   const postMerchantApi = async (url, body, signal) => {
     const token = getToken();
     if (!token) {
@@ -410,17 +447,14 @@
       headers: {
         "Content-Type": "application/json;charset=UTF-8",
         "Accept": "application/json, text/plain, */*",
+        "X-Requested-With": "XMLHttpRequest",
         "Merchant-Token": token
       },
       body: JSON.stringify(body),
       signal
     });
 
-    if (!response.ok) {
-      throw new Error(`接口请求失败：HTTP ${response.status}`);
-    }
-
-    const payload = await response.json();
+    const payload = await parseMerchantApiResponse(response);
     if (payload.code !== 1) {
       throw new Error(payload.msg || payload.message || `接口返回异常：${payload.code}`);
     }
