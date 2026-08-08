@@ -3,10 +3,12 @@
 
   const ROOT_ID = "ldxp-edge-filter-root";
   const API_URL = "/merchantApi/MyParent/searchGoodsList";
-  const MAX_FETCH_PAGES = 500;
-  const DEFAULT_FETCH_SIZE = 50;
-  const FETCH_PAGE_INTERVAL_MS = 4000;
-  const FETCH_PAGE_RETRY_DELAYS_MS = [30000, 60000, 120000];
+  const LOGICAL_FETCH_PAGE_SIZE = 50;
+  const MAX_API_FETCH_SIZE = 500;
+  const MAX_API_REQUESTS_PER_RUN = 15;
+  const MAX_FETCH_PAGES = (MAX_API_FETCH_SIZE * MAX_API_REQUESTS_PER_RUN) / LOGICAL_FETCH_PAGE_SIZE;
+  const FETCH_PAGE_INTERVAL_MS = 1000;
+  const FETCH_PAGE_RETRY_DELAYS_MS = [1000, 1000, 1000];
   const RECOGNIZED_HOSTS = new Set(["pay.ldxp.cn", "www.ldxp.cn"]);
   const EXTENSION_VERSION = chrome.runtime.getManifest().version;
   const MINI_WIDTH = 62;
@@ -434,24 +436,32 @@
     };
   };
 
-  const buildRequestBody = (page, filters) => ({
+  const buildRequestBody = (page, pageSize, filters) => ({
     current: page,
-    pageSize: DEFAULT_FETCH_SIZE,
+    pageSize,
     name: "",
     goods_type: filters.goodsType,
     keywords: filters.keyword
   });
 
-  const describeHtmlResponse = (raw, url) => {
+  const describeHtmlResponse = (raw, url, edgeError) => {
     const lower = raw.toLocaleLowerCase();
+    if (/http_ratelimit/i.test(edgeError) || lower.includes("acw_sc__v2")) {
+      return {
+        kind: "阿里云 ESA 限流验证页",
+        retryable: false,
+        authenticationPage: false,
+        rateLimited: true
+      };
+    }
     if (lower.includes("err_blocked_by_client") || lower.includes("blocked by client")) {
-      return { kind: "浏览器拦截页", retryable: false, authenticationPage: false };
+      return { kind: "浏览器拦截页", retryable: false, authenticationPage: false, rateLimited: false };
     }
     if (/captcha|challenge|waf|安全验证|安全校验|人机验证|verify you are human/i.test(lower)) {
-      return { kind: "站点安全校验页", retryable: false, authenticationPage: false };
+      return { kind: "站点安全校验页", retryable: false, authenticationPage: false, rateLimited: false };
     }
     if (/login|signin|登录|重新登录/i.test(lower) || /\/login(?:[/?#]|$)/i.test(url)) {
-      return { kind: "登录页", retryable: false, authenticationPage: true };
+      return { kind: "登录页", retryable: false, authenticationPage: true, rateLimited: false };
     }
     const title = raw.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1]
       ?.replace(/<[^>]+>/g, " ")
@@ -460,22 +470,26 @@
     return {
       kind: title ? `网页（${title.slice(0, 80)}）` : "HTML 页面",
       retryable: true,
-      authenticationPage: false
+      authenticationPage: false,
+      rateLimited: false
     };
   };
 
   const parseMerchantApiResponse = async (response) => {
     const contentType = response.headers.get("content-type")?.toLocaleLowerCase() || "";
+    const edgeError = response.headers.get("x-tengine-error") || "";
     const raw = (await response.text()).replace(/^\uFEFF/, "").trim();
     const looksLikeHtml = contentType.includes("text/html") || /^</.test(raw);
     const responseInfo = `HTTP ${response.status}${contentType ? `，${contentType}` : ""}`;
 
     if (looksLikeHtml) {
       const redirectedToLogin = response.redirected && /login|signin|登录/i.test(response.url);
-      const htmlResponse = describeHtmlResponse(raw, response.url);
+      const htmlResponse = describeHtmlResponse(raw, response.url, edgeError);
       const error = new Error(
         redirectedToLogin || htmlResponse.authenticationPage
           ? "登录状态可能已失效，接口跳转到了登录页。请刷新原站并重新登录后重试。"
+          : htmlResponse.rateLimited
+            ? "原站的阿里云 ESA 拒绝了本次请求（denied by http_ratelimit）。这是站点限流，不是登录或 JSON 解析问题。"
           : htmlResponse.retryable
             ? `原站暂时返回了${htmlResponse.kind}而不是 JSON（${responseInfo}），通常是连续请求触发了限流。`
             : `接口返回了${htmlResponse.kind}而不是 JSON（${responseInfo}），请处理页面拦截后重试。`
@@ -483,6 +497,7 @@
       error.isHtmlResponse = true;
       error.isTransientHtmlResponse = htmlResponse.retryable && !redirectedToLogin;
       error.isAuthenticationPage = htmlResponse.authenticationPage || redirectedToLogin;
+      error.isRateLimitResponse = htmlResponse.rateLimited;
       throw error;
     }
 
@@ -535,7 +550,7 @@
     try {
       payload = await parseMerchantApiResponse(response);
     } catch (error) {
-      if (!error.isHtmlResponse || !token || !allowCookieFallback) {
+      if (!error.isHtmlResponse || error.isRateLimitResponse || !token || !allowCookieFallback) {
         throw error;
       }
       response = await request(false);
@@ -549,8 +564,8 @@
     return payload;
   };
 
-  const fetchPage = async (page, filters, signal) => {
-    const payload = await postMerchantApi(API_URL, buildRequestBody(page, filters), signal, {
+  const fetchPage = async (page, pageSize, filters, signal) => {
+    const payload = await postMerchantApi(API_URL, buildRequestBody(page, pageSize, filters), signal, {
       allowCookieFallback: page === 1
     });
     return normalizePage(payload);
@@ -579,12 +594,12 @@
       signal?.addEventListener("abort", abort, { once: true });
     });
 
-  const fetchPageWithRetry = async (page, filters, signal) => {
+  const fetchPageWithRetry = async (page, pageSize, filters, signal) => {
     let lastError;
 
     for (let attempt = 0; attempt <= FETCH_PAGE_RETRY_DELAYS_MS.length; attempt += 1) {
       try {
-        return await fetchPage(page, filters, signal);
+        return await fetchPage(page, pageSize, filters, signal);
       } catch (error) {
         lastError = error;
         const canRetry = error.isTransientHtmlResponse && attempt < FETCH_PAGE_RETRY_DELAYS_MS.length;
@@ -594,7 +609,7 @@
 
         const delay = FETCH_PAGE_RETRY_DELAYS_MS[attempt];
         setStatus(
-          `第 ${page} 页疑似触发原站限流，冷却 ${Math.ceil(delay / 1000)} 秒后重试（${attempt + 1}/${FETCH_PAGE_RETRY_DELAYS_MS.length}）`,
+          `第 ${page} 批返回临时网页，${Math.ceil(delay / 1000)} 秒后重试（${attempt + 1}/${FETCH_PAGE_RETRY_DELAYS_MS.length}）`,
           "busy"
         );
         await waitForFetchDelay(delay, signal);
@@ -605,8 +620,9 @@
       throw lastError;
     }
 
-    const pageError = new Error(`第 ${page} 页请求失败：${lastError?.message || "未知错误"}`);
+    const pageError = new Error(`第 ${page} 批请求失败：${lastError?.message || "未知错误"}`);
     pageError.isHtmlResponse = Boolean(lastError?.isHtmlResponse);
+    pageError.isRateLimitResponse = Boolean(lastError?.isRateLimitResponse);
     throw pageError;
   };
 
@@ -781,19 +797,52 @@
 
     try {
       let serverTotal = null;
-      for (let page = 1; page <= filters.pages; page += 1) {
-        if (page > 1) {
+      const itemLimit = filters.pages * LOGICAL_FETCH_PAGE_SIZE;
+      let apiPageSize = Math.min(itemLimit, MAX_API_FETCH_SIZE);
+      let apiRequestLimit = Math.ceil(itemLimit / apiPageSize);
+
+      for (let requestPage = 1; requestPage <= apiRequestLimit; requestPage += 1) {
+        if (requestPage > 1) {
           await waitForFetchDelay(FETCH_PAGE_INTERVAL_MS, state.abortController.signal);
         }
-        setStatus(`正在请求第 ${page} / ${filters.pages} 页...`, "busy");
-        const { list, total } = await fetchPageWithRetry(page, filters, state.abortController.signal);
+        setStatus(`正在请求第 ${requestPage} / ${apiRequestLimit} 批...`, "busy");
+        const { list, total } = await fetchPageWithRetry(
+          requestPage,
+          apiPageSize,
+          filters,
+          state.abortController.signal
+        );
         if (total !== null) {
           serverTotal = total;
         }
-        state.raw.push(...list);
+
+        if (
+          requestPage === 1 &&
+          list.length > 0 &&
+          list.length < apiPageSize &&
+          serverTotal !== null &&
+          serverTotal > list.length
+        ) {
+          apiPageSize = list.length;
+          apiRequestLimit = Math.ceil(itemLimit / apiPageSize);
+          if (apiRequestLimit > MAX_API_REQUESTS_PER_RUN) {
+            throw new Error(
+              `原站每批实际只返回 ${apiPageSize} 条，当前范围需要 ${apiRequestLimit} 次请求，` +
+              `会超过已确认的限流阈值。请减少最多拉取页数，或填写商品关键词后再试。`
+            );
+          }
+        }
+
+        const remaining = itemLimit - state.raw.length;
+        state.raw.push(...list.slice(0, remaining));
         state.lastSummary = `已拉取 ${state.raw.length} 条，筛选后 ${state.filtered.length} 条`;
 
-        if ((serverTotal !== null && state.raw.length >= serverTotal) || list.length < DEFAULT_FETCH_SIZE) {
+        if (
+          state.raw.length >= itemLimit ||
+          (serverTotal !== null && state.raw.length >= serverTotal) ||
+          list.length === 0 ||
+          (serverTotal === null && list.length < apiPageSize)
+        ) {
           break;
         }
       }
