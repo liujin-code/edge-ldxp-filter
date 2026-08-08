@@ -8,6 +8,7 @@
   const FETCH_PAGE_INTERVAL_MS = 4000;
   const FETCH_PAGE_RETRY_DELAYS_MS = [30000, 60000, 120000];
   const RECOGNIZED_HOSTS = new Set(["pay.ldxp.cn", "www.ldxp.cn"]);
+  const EXTENSION_VERSION = chrome.runtime.getManifest().version;
   const MINI_WIDTH = 62;
   const MINI_HEIGHT = 62;
   const VIEWPORT_GAP = 8;
@@ -240,7 +241,7 @@
           <div class="ldxp-title">
             <span class="ldxp-title-mark">筛</span>
             <span>货源增强筛选</span>
-            <span class="ldxp-title-badge">轻甜版</span>
+            <span class="ldxp-title-badge">v${escapeHtml(EXTENSION_VERSION)}</span>
           </div>
           <div class="ldxp-subtitle">拉取接口数据后在本页筛选，不修改原站数据</div>
         </div>
