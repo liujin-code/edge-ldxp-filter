@@ -77,20 +77,54 @@
     try {
       const parsed = JSON.parse(raw);
       if (typeof parsed === "string") {
-        return parsed;
+        return parsed.trim();
       }
-      return parsed.value || parsed.token || parsed.access_token || parsed.accessToken || raw;
+      const candidates = [
+        parsed.value,
+        parsed.token,
+        parsed.access_token,
+        parsed.accessToken,
+        parsed.data?.value,
+        parsed.data?.token,
+        parsed.data?.access_token,
+        parsed.data?.accessToken,
+        parsed.data?.data?.token,
+        parsed.data?.data?.access_token,
+        parsed.data?.data?.accessToken
+      ];
+      const token = candidates.find((value) => typeof value === "string" && value.trim());
+      return token ? token.trim() : "";
     } catch (_) {
-      return raw;
+      return raw.trim();
     }
   };
 
   const getToken = () => {
     const keys = ["auth-token", "Merchant-Token", "merchant-token", "token", "Authorization"];
+    const storages = [];
+    try {
+      storages.push(localStorage);
+    } catch (_) {
+      // Ignore storage access failures and let the cookie session authenticate the request.
+    }
+    try {
+      storages.push(sessionStorage);
+    } catch (_) {
+      // Ignore storage access failures and let the cookie session authenticate the request.
+    }
     for (const key of keys) {
-      const value = localStorage.getItem(key);
-      if (value) {
-        return normalizeToken(value);
+      for (const storage of storages) {
+        try {
+          const value = storage.getItem(key);
+          if (value) {
+            const token = normalizeToken(value);
+            if (token) {
+              return token;
+            }
+          }
+        } catch (_) {
+          // Storage access can fail when the page has restricted storage access.
+        }
       }
     }
     return "";
@@ -398,6 +432,24 @@
     keywords: filters.keyword
   });
 
+  const describeHtmlResponse = (raw, url) => {
+    const lower = raw.toLocaleLowerCase();
+    if (lower.includes("err_blocked_by_client") || lower.includes("blocked by client")) {
+      return "浏览器拦截页";
+    }
+    if (/captcha|challenge|waf|安全验证|安全校验|人机验证|verify you are human/i.test(lower)) {
+      return "站点安全校验页";
+    }
+    if (/login|signin|登录|重新登录/i.test(lower) || /\/login(?:[/?#]|$)/i.test(url)) {
+      return "登录页";
+    }
+    const title = raw.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1]
+      ?.replace(/<[^>]+>/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+    return title ? `网页（${title.slice(0, 80)}）` : "HTML 页面";
+  };
+
   const parseMerchantApiResponse = async (response) => {
     const contentType = response.headers.get("content-type")?.toLocaleLowerCase() || "";
     const raw = (await response.text()).replace(/^\uFEFF/, "").trim();
@@ -406,11 +458,14 @@
 
     if (looksLikeHtml) {
       const redirectedToLogin = response.redirected && /login|signin|登录/i.test(response.url);
-      throw new Error(
+      const htmlKind = describeHtmlResponse(raw, response.url);
+      const error = new Error(
         redirectedToLogin
           ? "登录状态可能已失效，接口跳转到了登录页。请刷新原站并重新登录后重试。"
-          : `接口返回了网页而不是 JSON（${responseInfo}），可能是登录状态失效或站点安全校验拦截。请刷新当前链动小铺页面后重试。`
+          : `接口返回了${htmlKind}而不是 JSON（${responseInfo}），请刷新原站并重新登录后重试。`
       );
+      error.isHtmlResponse = true;
+      throw error;
     }
 
     if (!raw) {
@@ -437,24 +492,37 @@
 
   const postMerchantApi = async (url, body, signal) => {
     const token = getToken();
-    if (!token) {
-      throw new Error("没有在 localStorage 中找到 auth-token，请先登录链动小铺后台。");
-    }
-
-    const response = await fetch(url, {
-      method: "POST",
-      credentials: "include",
-      headers: {
+    const requestUrl = new URL(url, location.origin).href;
+    const request = (includeToken) => {
+      const headers = {
         "Content-Type": "application/json;charset=UTF-8",
         "Accept": "application/json, text/plain, */*",
-        "X-Requested-With": "XMLHttpRequest",
-        "Merchant-Token": token
-      },
-      body: JSON.stringify(body),
-      signal
-    });
+        "X-Requested-With": "XMLHttpRequest"
+      };
+      if (includeToken && token) {
+        headers["Merchant-Token"] = token;
+      }
+      return fetch(requestUrl, {
+        method: "POST",
+        credentials: "include",
+        headers,
+        body: JSON.stringify(body),
+        signal
+      });
+    };
 
-    const payload = await parseMerchantApiResponse(response);
+    let response = await request(true);
+    let payload;
+    try {
+      payload = await parseMerchantApiResponse(response);
+    } catch (error) {
+      if (!error.isHtmlResponse || !token) {
+        throw error;
+      }
+      response = await request(false);
+      payload = await parseMerchantApiResponse(response);
+    }
+
     if (payload.code !== 1) {
       throw new Error(payload.msg || payload.message || `接口返回异常：${payload.code}`);
     }
