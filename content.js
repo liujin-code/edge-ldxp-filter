@@ -5,8 +5,8 @@
   const API_URL = "/merchantApi/MyParent/searchGoodsList";
   const MAX_FETCH_PAGES = 500;
   const DEFAULT_FETCH_SIZE = 50;
-  const FETCH_PAGE_INTERVAL_MS = 1000;
-  const FETCH_PAGE_RETRY_DELAYS_MS = [2000, 5000, 10000];
+  const FETCH_PAGE_INTERVAL_MS = 4000;
+  const FETCH_PAGE_RETRY_DELAYS_MS = [30000, 60000, 120000];
   const RECOGNIZED_HOSTS = new Set(["pay.ldxp.cn", "www.ldxp.cn"]);
   const MINI_WIDTH = 62;
   const MINI_HEIGHT = 62;
@@ -444,19 +444,23 @@
   const describeHtmlResponse = (raw, url) => {
     const lower = raw.toLocaleLowerCase();
     if (lower.includes("err_blocked_by_client") || lower.includes("blocked by client")) {
-      return "浏览器拦截页";
+      return { kind: "浏览器拦截页", retryable: false, authenticationPage: false };
     }
     if (/captcha|challenge|waf|安全验证|安全校验|人机验证|verify you are human/i.test(lower)) {
-      return "站点安全校验页";
+      return { kind: "站点安全校验页", retryable: false, authenticationPage: false };
     }
     if (/login|signin|登录|重新登录/i.test(lower) || /\/login(?:[/?#]|$)/i.test(url)) {
-      return "登录页";
+      return { kind: "登录页", retryable: false, authenticationPage: true };
     }
     const title = raw.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1]
       ?.replace(/<[^>]+>/g, " ")
       .replace(/\s+/g, " ")
       .trim();
-    return title ? `网页（${title.slice(0, 80)}）` : "HTML 页面";
+    return {
+      kind: title ? `网页（${title.slice(0, 80)}）` : "HTML 页面",
+      retryable: true,
+      authenticationPage: false
+    };
   };
 
   const parseMerchantApiResponse = async (response) => {
@@ -467,13 +471,17 @@
 
     if (looksLikeHtml) {
       const redirectedToLogin = response.redirected && /login|signin|登录/i.test(response.url);
-      const htmlKind = describeHtmlResponse(raw, response.url);
+      const htmlResponse = describeHtmlResponse(raw, response.url);
       const error = new Error(
-        redirectedToLogin
+        redirectedToLogin || htmlResponse.authenticationPage
           ? "登录状态可能已失效，接口跳转到了登录页。请刷新原站并重新登录后重试。"
-          : `接口返回了${htmlKind}而不是 JSON（${responseInfo}），请刷新原站并重新登录后重试。`
+          : htmlResponse.retryable
+            ? `原站暂时返回了${htmlResponse.kind}而不是 JSON（${responseInfo}），通常是连续请求触发了限流。`
+            : `接口返回了${htmlResponse.kind}而不是 JSON（${responseInfo}），请处理页面拦截后重试。`
       );
       error.isHtmlResponse = true;
+      error.isTransientHtmlResponse = htmlResponse.retryable && !redirectedToLogin;
+      error.isAuthenticationPage = htmlResponse.authenticationPage || redirectedToLogin;
       throw error;
     }
 
@@ -499,8 +507,9 @@
     return payload;
   };
 
-  const postMerchantApi = async (url, body, signal) => {
+  const postMerchantApi = async (url, body, signal, options = {}) => {
     const token = getToken();
+    const { allowCookieFallback = true } = options;
     const requestUrl = new URL(url, location.origin).href;
     const request = (includeToken) => {
       const headers = {
@@ -525,7 +534,7 @@
     try {
       payload = await parseMerchantApiResponse(response);
     } catch (error) {
-      if (!error.isHtmlResponse || !token) {
+      if (!error.isHtmlResponse || !token || !allowCookieFallback) {
         throw error;
       }
       response = await request(false);
@@ -540,7 +549,9 @@
   };
 
   const fetchPage = async (page, filters, signal) => {
-    const payload = await postMerchantApi(API_URL, buildRequestBody(page, filters), signal);
+    const payload = await postMerchantApi(API_URL, buildRequestBody(page, filters), signal, {
+      allowCookieFallback: page === 1
+    });
     return normalizePage(payload);
   };
 
@@ -575,14 +586,14 @@
         return await fetchPage(page, filters, signal);
       } catch (error) {
         lastError = error;
-        const canRetry = error.isHtmlResponse && attempt < FETCH_PAGE_RETRY_DELAYS_MS.length;
+        const canRetry = error.isTransientHtmlResponse && attempt < FETCH_PAGE_RETRY_DELAYS_MS.length;
         if (!canRetry || error.name === "AbortError") {
           break;
         }
 
         const delay = FETCH_PAGE_RETRY_DELAYS_MS[attempt];
         setStatus(
-          `第 ${page} 页返回网页，${Math.ceil(delay / 1000)} 秒后重试（${attempt + 1}/${FETCH_PAGE_RETRY_DELAYS_MS.length}）`,
+          `第 ${page} 页疑似触发原站限流，冷却 ${Math.ceil(delay / 1000)} 秒后重试（${attempt + 1}/${FETCH_PAGE_RETRY_DELAYS_MS.length}）`,
           "busy"
         );
         await waitForFetchDelay(delay, signal);
