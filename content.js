@@ -5,6 +5,8 @@
   const API_URL = "/merchantApi/MyParent/searchGoodsList";
   const MAX_FETCH_PAGES = 500;
   const DEFAULT_FETCH_SIZE = 50;
+  const FETCH_PAGE_INTERVAL_MS = 1000;
+  const FETCH_PAGE_RETRY_DELAYS_MS = [2000, 5000, 10000];
   const RECOGNIZED_HOSTS = new Set(["pay.ldxp.cn", "www.ldxp.cn"]);
   const MINI_WIDTH = 62;
   const MINI_HEIGHT = 62;
@@ -251,21 +253,21 @@
       <div class="ldxp-body">
         <div class="ldxp-controls">
           <label>
-            <span>关键词</span>
-            <input data-field="keyword" type="search" placeholder="商品名 / 店铺 / 分类">
+            <span>商品关键词</span>
+            <input data-field="keyword" type="search" placeholder="商品名称关键词">
           </label>
           <label>
             <span>商品类型</span>
             <select data-field="goodsType">
               <option value="">全部</option>
               <option value="card">卡密</option>
-              <option value="knowledge">知识</option>
+              <option value="article">知识</option>
               <option value="resource">资源</option>
-              <option value="rights">权益</option>
+              <option value="equity">权益</option>
             </select>
           </label>
           <label>
-            <span>拉取页数</span>
+            <span>最多拉取页数</span>
             <input data-field="pages" type="number" min="1" max="${MAX_FETCH_PAGES}" value="5">
           </label>
           <label>
@@ -422,7 +424,14 @@
     pageSize: asNumber(field("pageSize").value, 10)
   });
 
-  const normalizeList = (payload) => Array.isArray(payload?.data?.list) ? payload.data.list : [];
+  const normalizePage = (payload) => {
+    const list = Array.isArray(payload?.data?.list) ? payload.data.list : [];
+    const total = asNumber(payload?.data?.total, null);
+    return {
+      list,
+      total: Number.isFinite(total) && total >= 0 ? total : null
+    };
+  };
 
   const buildRequestBody = (page, filters) => ({
     current: page,
@@ -532,7 +541,61 @@
 
   const fetchPage = async (page, filters, signal) => {
     const payload = await postMerchantApi(API_URL, buildRequestBody(page, filters), signal);
-    return normalizeList(payload);
+    return normalizePage(payload);
+  };
+
+  const waitForFetchDelay = (milliseconds, signal) =>
+    new Promise((resolve, reject) => {
+      let timer;
+      const abort = () => {
+        window.clearTimeout(timer);
+        signal?.removeEventListener("abort", abort);
+        const error = new Error("The operation was aborted.");
+        error.name = "AbortError";
+        reject(error);
+      };
+
+      if (signal?.aborted) {
+        abort();
+        return;
+      }
+
+      timer = window.setTimeout(() => {
+        signal?.removeEventListener("abort", abort);
+        resolve();
+      }, milliseconds);
+      signal?.addEventListener("abort", abort, { once: true });
+    });
+
+  const fetchPageWithRetry = async (page, filters, signal) => {
+    let lastError;
+
+    for (let attempt = 0; attempt <= FETCH_PAGE_RETRY_DELAYS_MS.length; attempt += 1) {
+      try {
+        return await fetchPage(page, filters, signal);
+      } catch (error) {
+        lastError = error;
+        const canRetry = error.isHtmlResponse && attempt < FETCH_PAGE_RETRY_DELAYS_MS.length;
+        if (!canRetry || error.name === "AbortError") {
+          break;
+        }
+
+        const delay = FETCH_PAGE_RETRY_DELAYS_MS[attempt];
+        setStatus(
+          `第 ${page} 页返回网页，${Math.ceil(delay / 1000)} 秒后重试（${attempt + 1}/${FETCH_PAGE_RETRY_DELAYS_MS.length}）`,
+          "busy"
+        );
+        await waitForFetchDelay(delay, signal);
+      }
+    }
+
+    if (lastError?.name === "AbortError") {
+      throw lastError;
+    }
+
+    const pageError = new Error(`第 ${page} 页请求失败：${lastError?.message || "未知错误"}`);
+    pageError.isHtmlResponse = Boolean(lastError?.isHtmlResponse);
+    throw pageError;
   };
 
   const applyFilters = () => {
@@ -705,13 +768,20 @@
     render();
 
     try {
+      let serverTotal = null;
       for (let page = 1; page <= filters.pages; page += 1) {
+        if (page > 1) {
+          await waitForFetchDelay(FETCH_PAGE_INTERVAL_MS, state.abortController.signal);
+        }
         setStatus(`正在请求第 ${page} / ${filters.pages} 页...`, "busy");
-        const list = await fetchPage(page, filters, state.abortController.signal);
+        const { list, total } = await fetchPageWithRetry(page, filters, state.abortController.signal);
+        if (total !== null) {
+          serverTotal = total;
+        }
         state.raw.push(...list);
         state.lastSummary = `已拉取 ${state.raw.length} 条，筛选后 ${state.filtered.length} 条`;
 
-        if (list.length < DEFAULT_FETCH_SIZE) {
+        if ((serverTotal !== null && state.raw.length >= serverTotal) || list.length < DEFAULT_FETCH_SIZE) {
           break;
         }
       }
