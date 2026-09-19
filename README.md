@@ -26,13 +26,13 @@
 
 ### 使用前置条件
 
-登录链动小铺后台，打开 `https://www.ldxp.cn/` 或 `https://pay.ldxp.cn/` 下的页面；识别到站点后会先显示右上角悬浮小胶囊，点击后展开完整面板。货源筛选推荐进入 `https://www.ldxp.cn/merchant/my_parent/source_square` 或 `https://pay.ldxp.cn/merchant/my_parent/source_square`。
+登录链动小铺后台，打开 `https://wzyp.cn/`、`https://www.ldxp.cn/` 或 `https://pay.ldxp.cn/` 下的页面；识别到站点后会先显示右上角悬浮小胶囊，点击后展开完整面板。货源筛选推荐进入 `https://wzyp.cn/merchant/my_parent/source_square`。
 
 ## 使用
 
 - `开始拉取`：把商品关键词和商品类型交给 `/merchantApi/MyParent/searchGoodsList` 服务端先筛选；面板仍按每页 50 条计算拉取上限，但接口会合并为最多 500 条一批请求。单次最多拉取 150 页（7500 条），最多产生 15 次接口请求，低于实测的第 21 次 ESA 限流阈值。
 - 连续请求间隔为 1 秒。扩展会识别阿里云 ESA 的 `denied by http_ratelimit` 响应，不再把它误报成登录失效或普通 JSON 解析错误。
-- 识别到 `pay.ldxp.cn` 或 `www.ldxp.cn` 后会自动显示可拖拽悬浮小胶囊，不会默认展开遮挡页面。
+- 识别到 `wzyp.cn`、`pay.ldxp.cn` 或 `www.ldxp.cn` 后会自动显示可拖拽悬浮小胶囊，不会默认展开遮挡页面。
 - `筛选当前数据`：不重新请求接口，只对已经拉取的数据重新筛选。
 - `停止拉取`：拉取过程中再次点击按钮会中止请求。
 - 关键词、分类关键词和商家名称筛选都不区分大小写。

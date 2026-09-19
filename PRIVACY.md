@@ -6,6 +6,7 @@ This extension is designed for filtering and comparing source goods on supported
 
 The extension runs only on supported LDXP domains declared in the extension manifest:
 
+- `https://wzyp.cn/*`
 - `https://pay.ldxp.cn/*`
 - `https://www.ldxp.cn/*`
 

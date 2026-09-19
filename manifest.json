@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "__MSG_extensionName__",
-  "version": "1.0.22",
+  "version": "1.0.23",
   "default_locale": "zh_CN",
   "description": "__MSG_extensionDescription__",
   "icons": {
@@ -11,6 +11,7 @@
     "128": "assets/icon-128.png"
   },
   "host_permissions": [
+    "https://wzyp.cn/*",
     "https://pay.ldxp.cn/*",
     "https://www.ldxp.cn/*"
   ],
@@ -20,6 +21,7 @@
         "assets/icon-48.png"
       ],
       "matches": [
+        "https://wzyp.cn/*",
         "https://pay.ldxp.cn/*",
         "https://www.ldxp.cn/*"
       ]
@@ -28,6 +30,7 @@
   "content_scripts": [
     {
       "matches": [
+        "https://wzyp.cn/*",
         "https://pay.ldxp.cn/*",
         "https://www.ldxp.cn/*"
       ],

@@ -9,7 +9,7 @@
   const MAX_FETCH_PAGES = (MAX_API_FETCH_SIZE * MAX_API_REQUESTS_PER_RUN) / LOGICAL_FETCH_PAGE_SIZE;
   const FETCH_PAGE_INTERVAL_MS = 1000;
   const FETCH_PAGE_RETRY_DELAYS_MS = [1000, 1000, 1000];
-  const RECOGNIZED_HOSTS = new Set(["pay.ldxp.cn", "www.ldxp.cn"]);
+  const RECOGNIZED_HOSTS = new Set(["wzyp.cn", "pay.ldxp.cn", "www.ldxp.cn"]);
   const EXTENSION_VERSION = chrome.runtime.getManifest().version;
   const MINI_WIDTH = 62;
   const MINI_HEIGHT = 62;
